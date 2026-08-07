@@ -5,5 +5,27 @@
       "cloudtrail:StartQuery",
       "cloudtrail:GetQueryResults"],
     "Resource": ["*"]
+  },
+  {
+    "Action": [
+      "athena:StartQueryExecution",
+      "athena:GetQueryExecution"],
+    "Resource": ["*"]
+  },
+  {
+    "Action": [
+      "glue:GetDatabase",
+      "glue:GetTable",
+      "glue:GetPartitions"],
+    "Resource": ["*"]
+  },
+  {
+    "Action": [
+      "s3:GetBucketLocation",
+      "s3:GetObject",
+      "s3:ListBucket",
+      "s3:PutObject",
+      "s3:AbortMultipartUpload"],
+    "Resource": ["*"]
   }
 ]

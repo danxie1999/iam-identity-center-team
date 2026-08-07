@@ -3,5 +3,17 @@
     "Action": [
       "cloudtrail:GetQueryResults"],
     "Resource": ["*"]
+  },
+  {
+    "Action": [
+      "athena:GetQueryResults"],
+    "Resource": ["*"]
+  },
+  {
+    "Action": [
+      "s3:GetBucketLocation",
+      "s3:GetObject",
+      "s3:ListBucket"],
+    "Resource": ["*"]
   }
 ]
