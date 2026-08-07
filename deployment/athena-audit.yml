@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  TEAM audit infrastructure for the CloudTrail + Athena audit backend.
+  Creates an organization trail delivering management events to S3, a Glue
+  database/table over the logs and a dedicated Athena workgroup. Deploy this
+  stack in the TEAM delegated administrator account, then set
+  CLOUDTRAIL_AUDIT_LOGS to the GlueTableArn stack output.
+
+Parameters:
+  OrganizationId:
+    Type: String
+    Description: AWS Organizations ID (e.g. o-abc123defg)
+    AllowedPattern: "^o-[a-z0-9]{10,32}$"
+  ManagementAccountId:
+    Type: String
+    Description: AWS Organizations management account ID
+    AllowedPattern: "^[0-9]{12}$"
+  TrailName:
+    Type: String
+    Default: team-audit-trail
+    Description: Name of the organization trail
+  GlueDatabaseName:
+    Type: String
+    Default: team_audit
+    Description: Glue database name for the audit table
+  GlueTableName:
+    Type: String
+    Default: cloudtrail_logs
+    Description: Glue table name over the CloudTrail logs
+  AthenaWorkGroupName:
+    Type: String
+    Default: team-audit
+    Description: Dedicated Athena workgroup used by the TEAM audit lambdas
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Days to retain CloudTrail logs in S3
+  ResultsRetentionDays:
+    Type: Number
+    Default: 30
+    Description: Days to retain Athena query results in S3
+
+Resources:
+  TrailLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub team-audit-trail-logs-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-logs
+            Status: Enabled
+            ExpirationInDays: !Ref LogRetentionDays
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub team-audit-athena-results-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-results
+            Status: Enabled
+            ExpirationInDays: !Ref ResultsRetentionDays
+
+  TrailLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailLogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt TrailLogBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn:
+                  - !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${ManagementAccountId}:trail/${TrailName}
+                  - !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${TrailName}
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource:
+              - !Sub ${TrailLogBucket.Arn}/AWSLogs/${ManagementAccountId}/*
+              - !Sub ${TrailLogBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn:
+                  - !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${ManagementAccountId}:trail/${TrailName}
+                  - !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${TrailName}
+          - Sid: AWSCloudTrailOrganizationWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${TrailLogBucket.Arn}/AWSLogs/${OrganizationId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn:
+                  - !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${ManagementAccountId}:trail/${TrailName}
+                  - !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${TrailName}
+
+  # NOTE: the organization trail itself is intentionally NOT defined here.
+  # The AWS::CloudTrail::Trail resource handler cannot manage organization
+  # trails created from a delegated administrator account: the created trail
+  # is owned by the management account and the handler's read-back against
+  # the local account fails with NotFound, rolling back the stack. The trail
+  # is created by deployment/athena-audit-deploy.sh via the CLI instead.
+
+  AuditGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+        Description: TEAM audit database over organization CloudTrail logs
+
+  # NOTE: the table intentionally uses org.apache.hive.hcatalog.data.JsonSerDe.
+  # The legacy com.amazon.emr.hive.serde.CloudTrailSerde has a hardcoded schema
+  # and fails with HIVE_BAD_DATA on newer userIdentity fields (onBehalfOf,
+  # sourceIdentity) that are required for IAM Identity Center session auditing.
+  AuditGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AuditGlueDatabase
+      TableInput:
+        Name: !Ref GlueTableName
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: cloudtrail
+        StorageDescriptor:
+          Location: !Sub s3://${TrailLogBucket}/AWSLogs/
+          InputFormat: com.amazon.emr.cloudtrail.CloudTrailInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hive.hcatalog.data.JsonSerDe
+          Columns:
+            - Name: eventversion
+              Type: string
+            - Name: useridentity
+              Type: struct<type:string,principalid:string,arn:string,accountid:string,invokedby:string,accesskeyid:string,username:string,onbehalfof:struct<userid:string,identitystorearn:string>,sessioncontext:struct<attributes:struct<mfaauthenticated:string,creationdate:string>,sessionissuer:struct<type:string,principalid:string,arn:string,accountid:string,username:string>,ec2roledelivery:string,webidfederationdata:struct<federatedprovider:string,attributes:map<string,string>>,sourceidentity:string>>
+            - Name: eventtime
+              Type: string
+            - Name: eventsource
+              Type: string
+            - Name: eventname
+              Type: string
+            - Name: awsregion
+              Type: string
+            - Name: sourceipaddress
+              Type: string
+            - Name: useragent
+              Type: string
+            - Name: errorcode
+              Type: string
+            - Name: errormessage
+              Type: string
+            - Name: requestparameters
+              Type: string
+            - Name: responseelements
+              Type: string
+            - Name: additionaleventdata
+              Type: string
+            - Name: requestid
+              Type: string
+            - Name: eventid
+              Type: string
+            - Name: resources
+              Type: array<struct<arn:string,accountid:string,type:string>>
+            - Name: eventtype
+              Type: string
+            - Name: apiversion
+              Type: string
+            - Name: readonly
+              Type: string
+            - Name: recipientaccountid
+              Type: string
+            - Name: serviceeventdetails
+              Type: string
+            - Name: sharedeventid
+              Type: string
+            - Name: vpcendpointid
+              Type: string
+            - Name: tlsdetails
+              Type: struct<tlsversion:string,ciphersuite:string,clientprovidedhostheader:string>
+
+  AuditWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Ref AthenaWorkGroupName
+      Description: Dedicated workgroup for TEAM audit queries
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: false
+        ResultConfiguration:
+          OutputLocation: !Sub s3://${AthenaResultsBucket}/
+
+Outputs:
+  GlueTableArn:
+    Description: >-
+      Set this as CLOUDTRAIL_AUDIT_LOGS in deployment/parameters.sh to enable
+      the Athena audit backend
+    Value: !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabaseName}/${GlueTableName}
+  AthenaWorkGroup:
+    Description: Workgroup used by the TEAM audit lambdas (ATHENA_WORKGROUP)
+    Value: !Ref AuditWorkGroup
+  TrailLogBucketName:
+    Value: !Ref TrailLogBucket
+  AthenaResultsBucketName:
+    Value: !Ref AthenaResultsBucket
+  TrailName:
+    Description: Trail name expected by the bucket policy (created by athena-audit-deploy.sh)
+    Value: !Ref TrailName
+  TrailArn:
+    Description: >-
+      ARN of the organization trail. Organization trails are owned by the
+      management account even when created from the delegated administrator.
+    Value: !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${ManagementAccountId}:trail/${TrailName}

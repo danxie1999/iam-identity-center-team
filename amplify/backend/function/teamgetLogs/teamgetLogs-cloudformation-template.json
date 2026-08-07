@@ -87,6 +87,7 @@
             "EVENT_DATA_STORE": {
               "Ref": "customcloudtrailLakeEventDataStoreOutput"
             },
+            "ATHENA_WORKGROUP": "team-audit",
             "API_AWSPIM_GRAPHQLAPIIDOUTPUT": {
               "Ref": "apiteamGraphQLAPIIdOutput"
             },
