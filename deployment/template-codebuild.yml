@@ -150,6 +150,7 @@ Resources:
                 - npx cdk deploy --all --require-approval never --method=direct
                 - cd $CODEBUILD_SRC_DIR
                 - '# Frontend: React build + hosting stack'
+                - python3 deployment/generate-aws-exports.py "amplify-teamidcapp-${ENV_NAME:-main}-00000"
                 - npm ci
                 - npm run build
                 - aws cloudformation deploy --template-file deployment/frontend-hosting.yml --stack-name TEAM-FRONTEND-HOSTING --parameter-overrides frontendMode=$FRONTEND_MODE --capabilities CAPABILITY_IAM
