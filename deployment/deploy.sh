@@ -17,6 +17,24 @@ set -xe
 
 . "./parameters.sh"
 
+# ---- Deployment-mode selection & partition fail-fast (all optional; unset = current behaviour) ----
+DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-amplify}"
+case "$DEPLOYMENT_MODE" in
+  amplify)   TEMPLATE_FILE=template.yml ;;
+  codebuild) TEMPLATE_FILE=template-codebuild.yml ;;
+  *) echo "ERROR: DEPLOYMENT_MODE must be 'amplify' or 'codebuild' (got '$DEPLOYMENT_MODE')"; exit 1 ;;
+esac
+if [[ "$REGION" == cn-* && "$DEPLOYMENT_MODE" == "amplify" ]]; then
+  echo "ERROR: Amplify Hosting is not available in the China (aws-cn) regions."
+  echo "       Set DEPLOYMENT_MODE=codebuild in parameters.sh."
+  exit 1
+fi
+if [[ "$DEPLOYMENT_MODE" == "codebuild" && ! -z "$UI_DOMAIN" ]]; then
+  echo "ERROR: UI_DOMAIN is not yet supported with DEPLOYMENT_MODE=codebuild (configure the custom domain on the frontend hosting stack instead)."
+  exit 1
+fi
+
+
 if [ -z "$TEAM_ACCOUNT" ]; then 
   export AWS_PROFILE=$ORG_MASTER_PROFILE
 else 
@@ -34,7 +52,7 @@ if [ -z "$SECRET_NAME" ]; then
   cd ./deployment
   if [[ ! -z "$TAGS" ]]; then
     if [[ ! -z "$UI_DOMAIN" ]]; then
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \
@@ -48,7 +66,7 @@ if [ -z "$SECRET_NAME" ]; then
         --tags $TAGS \
         --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \
@@ -63,7 +81,7 @@ if [ -z "$SECRET_NAME" ]; then
     fi
   else
     if [[ ! -z "$UI_DOMAIN" ]]; then
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \
@@ -76,7 +94,7 @@ if [ -z "$SECRET_NAME" ]; then
           cacheTTL=$CACHE_TTL \
         --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \
@@ -92,7 +110,7 @@ else
   cd ./deployment
   if [[ ! -z "$TAGS" ]]; then
     if [[ ! -z "$UI_DOMAIN" ]]; then
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \
@@ -108,7 +126,7 @@ else
         --tags $TAGS \
         --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \
@@ -125,7 +143,7 @@ else
     fi
   else
     if [[ ! -z "$UI_DOMAIN" ]]; then
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \
@@ -140,7 +158,7 @@ else
           customRepositorySecretName="$SECRET_NAME" \
         --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
-      aws cloudformation deploy --region $REGION --template-file template.yml \
+      aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
         --parameter-overrides \
           Login=$IDC_LOGIN_URL \

@@ -28,3 +28,13 @@ CACHE_TTL=604800
 # UI_DOMAIN=portal.teamtest.online
 
 
+
+# ---- Optional deployment options (defaults preserve current behaviour) ----
+# DEPLOYMENT_MODE: 'amplify' (default) or 'codebuild'.
+#   codebuild deploys via template-codebuild.yml: the backend is generated at
+#   build time by 'amplify export' and deployed as plain CloudFormation - for
+#   partitions/environments without Amplify Hosting (aws-cn, aws-us-gov, etc.)
+# DEPLOYMENT_MODE=codebuild
+#
+# FRONTEND_MODE (codebuild mode only): 'cloudfront' (default) or 'apigateway'.
+# FRONTEND_MODE=apigateway

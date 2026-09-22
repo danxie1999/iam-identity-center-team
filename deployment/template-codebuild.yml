@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Temporary Elevated Access Management (TEAM) Application stack — CodeBuild
+  deployment rail. Structural mirror of template.yml for partitions and
+  environments without Amplify Hosting (aws-cn, aws-us-gov, Amplify-restricted
+  enterprises): AWS::CodeBuild::Project replaces Amplify App/Branch, the same
+  environment variables carry the configuration, and the same
+  TriggerBuildLambda pattern starts the first build. The backend is generated
+  at build time by `amplify export` from amplify/ (the single source for both
+  rails) and deployed as plain CloudFormation.
+Parameters:
+  Login:
+    Type: String
+    Description: IAM IDC Login URL
+  CloudTrailAuditLogs:
+    Type: "String"
+    AllowedPattern: "(read_write|read|write|none|arn.*)"
+    Description: Which events should be logged on the TEAM Application audit store. Acceptable values are "read","write","read_write","none", or the arn of an existing CloudTrail Lake EDS.
+  teamAdminGroup:
+    Type: String
+    Description: TEAM application Admin group
+  teamAuditGroup:
+    Type: String
+    Description: TEAM application Auditor group
+  tags:
+    Type: String
+    Description: TEAM application tags
+    Default: ""
+  teamAccount:
+    Type: String
+    Description: TEAM deployment account ID
+  customRepository:
+    Type: String
+    Description: Use a custom repository for the TEAM application?
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'No'
+  customRepositorySecretName:
+    Type: String
+    Description: Name of the secret in AWS Secrets Manager
+    Default: ''
+  cacheTTL:
+    Type: Number
+    Description: Cache TTL in seconds for OU accounts cache
+    Default: 604800
+  frontendMode:
+    Type: String
+    Description: Frontend hosting mode used by frontend-hosting.yml
+    AllowedValues:
+      - cloudfront
+      - apigateway
+    Default: cloudfront
+
+Conditions:
+  IsEmptyCloudTrailAuditLogs: !Equals [!Ref CloudTrailAuditLogs, ""]
+  UseExternalRepo: !Equals [!Ref customRepository, 'Yes']
+
+Resources:
+  TriggerCodeBuild:
+    Type: Custom::TriggerCodeBuild
+    Properties:
+      ServiceToken: !GetAtt 'TriggerBuildLambda.Arn'
+      projectName: !Ref BuildProject
+
+  BuildRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W9
+            reason: "Mirror of the Amplify rail's AmplifyRole - the build deploys the whole backend."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Path: /
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess"
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: TEAM-IDC-APP-build
+      Description: Temporary Elevated Access Management Application (CodeBuild rail)
+      ServiceRole: !GetAtt BuildRole.Arn
+      TimeoutInMinutes: 90
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_LARGE
+        EnvironmentVariables:
+          - Name: SSO_LOGIN
+            Value: !Ref Login
+          - Name: TEAM_ACCOUNT
+            Value: !Ref teamAccount
+          - Name: CLOUDTRAIL_AUDIT_LOGS
+            Value: !If
+              - IsEmptyCloudTrailAuditLogs
+              - "read_write"
+              - !Ref CloudTrailAuditLogs
+          - Name: TEAM_ADMIN_GROUP
+            Value: !Ref teamAdminGroup
+          - Name: TEAM_AUDITOR_GROUP
+            Value: !Ref teamAuditGroup
+          - Name: TAGS
+            Value: !Ref tags
+          - Name: CACHE_TTL
+            Value: !Ref cacheTTL
+          - Name: FRONTEND_MODE
+            Value: !Ref frontendMode
+      Source:
+        Type: CODECOMMIT
+        Location: !If
+          - UseExternalRepo
+          - !Sub >-
+            {{resolve:secretsmanager:${customRepositorySecretName}:SecretString:url}}
+          - !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/team-idc-app
+        BuildSpec: |-
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 20
+            pre_build:
+              commands:
+                - npm i -g @aws-amplify/cli@14.0.0
+                - node parameters.js
+                - python3 deployment/headless-export-prep.py
+            build:
+              commands:
+                - '# Backend: generate CloudFormation from amplify/ at build time'
+                - npm i -S graphql-ttl-transformer
+                - amplify export --out ./export-out
+                - python3 deployment/normalize-partition.py export-out/amplify-export-teamidcapp
+                - '# Deploy the exported backend via the official construct'
+                - cd deployment/exported-backend-app && npm ci --no-audit --no-fund
+                - export EXPORT_PATH=$CODEBUILD_SRC_DIR/export-out/amplify-export-teamidcapp
+                - npx cdk deploy --all --require-approval never --method=direct
+                - cd $CODEBUILD_SRC_DIR
+                - '# Frontend: React build + hosting stack'
+                - npm ci
+                - npm run build
+                - aws cloudformation deploy --template-file deployment/frontend-hosting.yml --stack-name TEAM-FRONTEND-HOSTING --parameter-overrides frontendMode=$FRONTEND_MODE --capabilities CAPABILITY_IAM
+                - '# sync build/ to the hosting bucket exported by the hosting stack'
+                - BUCKET=$(aws cloudformation describe-stacks --stack-name TEAM-FRONTEND-HOSTING --query "Stacks[0].Outputs[?OutputKey=='BucketName']|[0].OutputValue" --output text)
+                - aws s3 sync build/ "s3://$BUCKET/" --delete
+
+  # Rebuild on repo push (EnableAutoBuild equivalent of the Amplify branch)
+  RepoPushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Rebuild TEAM on team-idc-app push (EnableAutoBuild equivalent)
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !Sub arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:team-idc-app
+        detail:
+          event:
+            - referenceUpdated
+          referenceName:
+            - main
+      Targets:
+        - Id: StartBuild
+          Arn: !GetAtt BuildProject.Arn
+          RoleArn: !GetAtt EventsStartBuildRole.Arn
+
+  EventsStartBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartBuild
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: codebuild:StartBuild
+                Resource: !GetAtt BuildProject.Arn
+
+  TriggerBuildLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt TriggerLambdaRole.Arn
+      Timeout: 120
+      Architectures:
+        - arm64
+      Code:
+        ZipFile: |
+          import json
+          import cfnresponse
+          import boto3
+          import logging
+          from botocore.exceptions import ClientError
+          client = boto3.client('codebuild')
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              logger.info("Received event: %s" % json.dumps(event))
+              project = event['ResourceProperties']['projectName']
+              result = cfnresponse.SUCCESS
+              try:
+                  if event['RequestType'] in ('Create', 'Update'):
+                      client.start_build(projectName=project)
+              except ClientError as e:
+                  logger.error('Error: %s', e)
+                  result = cfnresponse.FAILED
+              cfnresponse.send(event, context, result, {})
+
+  TriggerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TriggerBuildPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowLogging
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              - Sid: startBuild
+                Effect: Allow
+                Action:
+                  - "codebuild:StartBuild"
+                Resource: !GetAtt BuildProject.Arn
+
+Outputs:
+  BuildProjectName:
+    Value: !Ref BuildProject

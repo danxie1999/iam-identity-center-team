@@ -1,0 +1,14 @@
+{
+  "name": "team-exported-backend-app",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "aws-cdk-lib": "^2.150.0",
+    "constructs": "^10.3.0",
+    "@aws-amplify/cdk-exported-backend": "^0.0.6",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.150.0"
+  }
+}
