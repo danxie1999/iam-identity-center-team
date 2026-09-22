@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  TEAM frontend hosting for the CodeBuild deployment rail. Two self-contained
+  modes selected by frontendMode: cloudfront (S3 + CloudFront with Origin
+  Access Control, default) or apigateway (S3 + a small static-serving Lambda
+  behind an HTTP API — for regions/environments where CloudFront is
+  unavailable or undesirable). Partition-portable (aws / aws-cn / aws-us-gov).
+  Deployed by the template-codebuild.yml buildspec after the frontend build.
+
+Parameters:
+  frontendMode:
+    Type: String
+    AllowedValues: [cloudfront, apigateway]
+    Default: cloudfront
+    Description: >-
+      cloudfront (default) = serve the SPA via a CloudFront distribution.
+      apigateway = serve the SPA via this stack's own static-file Lambda and
+      HTTP API (no CloudFront dependency).
+  DomainName:
+    Type: String
+    Default: ""
+    Description: Optional CloudFront custom domain (requires AcmCertificateArn; cloudfront mode only)
+  AcmCertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN (required if DomainName is set)
+
+Conditions:
+  UseCloudFront: !Equals [!Ref frontendMode, cloudfront]
+  UseApiGateway: !Equals [!Ref frontendMode, apigateway]
+  HasCustomDomain: !And
+    - !Equals [!Ref frontendMode, cloudfront]
+    - !Not [!Equals [!Ref DomainName, ""]]
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub team-frontend-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ------------------------- cloudfront mode -------------------------
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: UseCloudFront
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  OAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Condition: UseCloudFront
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub team-frontend-oac-${AWS::AccountId}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: UseCloudFront
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        Aliases: !If
+          - HasCustomDomain
+          - [!Ref DomainName]
+          - !Ref "AWS::NoValue"
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !GetAtt OAC.Id
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+
+  # ------------------------- apigateway mode -------------------------
+  StaticServeRole:
+    Type: AWS::IAM::Role
+    Condition: UseApiGateway
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReadFrontendBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub ${FrontendBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt FrontendBucket.Arn
+
+  StaticServeFunction:
+    Type: AWS::Lambda::Function
+    Condition: UseApiGateway
+    Properties:
+      FunctionName: team-frontend-static
+      Handler: index.handler
+      Runtime: python3.12
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt StaticServeRole.Arn
+      Environment:
+        Variables:
+          BUCKET: !Ref FrontendBucket
+      Code:
+        ZipFile: |
+          import base64
+          import mimetypes
+          import os
+          import boto3
+          from botocore.exceptions import ClientError
+
+          s3 = boto3.client("s3")
+          BUCKET = os.environ["BUCKET"]
+          TEXT_TYPES = ("text/", "application/json", "application/javascript",
+                        "image/svg+xml")
+
+          def handler(event, context):
+              path = (event.get("rawPath") or "/").lstrip("/") or "index.html"
+              try:
+                  obj = s3.get_object(Bucket=BUCKET, Key=path)
+              except ClientError:
+                  # SPA fallback: unknown routes serve index.html
+                  obj = s3.get_object(Bucket=BUCKET, Key="index.html")
+                  path = "index.html"
+              body = obj["Body"].read()
+              ctype = (obj.get("ContentType")
+                       or mimetypes.guess_type(path)[0]
+                       or "application/octet-stream")
+              is_text = ctype.startswith(TEXT_TYPES)
+              return {
+                  "statusCode": 200,
+                  "headers": {"Content-Type": ctype,
+                              "Cache-Control": ("no-cache" if path == "index.html"
+                                                else "public, max-age=86400")},
+                  "isBase64Encoded": not is_text,
+                  "body": body.decode("utf-8") if is_text
+                          else base64.b64encode(body).decode("ascii"),
+              }
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Condition: UseApiGateway
+    Properties:
+      Name: team-frontend
+      ProtocolType: HTTP
+      Target: !GetAtt StaticServeFunction.Arn
+
+  HttpApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: UseApiGateway
+    Properties:
+      FunctionName: !Ref StaticServeFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+Outputs:
+  BucketName:
+    Value: !Ref FrontendBucket
+  FrontendUrl:
+    Description: URL the SPA is served from
+    Value: !If
+      - UseCloudFront
+      - !If
+        - HasCustomDomain
+        - !Sub https://${DomainName}
+        - !Sub https://${Distribution.DomainName}
+      - !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
