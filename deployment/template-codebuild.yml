@@ -126,7 +126,7 @@ Resources:
           - UseExternalRepo
           - !Sub >-
             {{resolve:secretsmanager:${customRepositorySecretName}:SecretString:url}}
-          - !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/team-idc-app
+          - !Sub https://git-codecommit.${AWS::Region}.${AWS::URLSuffix}/v1/repos/team-idc-app
         BuildSpec: |-
           version: 0.2
           phases:
