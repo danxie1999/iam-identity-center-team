@@ -19,17 +19,20 @@ Parameters:
   DomainName:
     Type: String
     Default: ""
-    Description: Optional CloudFront custom domain (requires AcmCertificateArn; cloudfront mode only)
+    Description: Optional custom UI domain, served by whichever mode is selected (requires AcmCertificateArn). Mandatory in the China regions - AWS-managed default domains cannot serve the UI there
   AcmCertificateArn:
     Type: String
     Default: ""
-    Description: ACM certificate ARN (required if DomainName is set)
+    Description: ACM certificate ARN for DomainName (regional certificate, same region as the stack)
 
 Conditions:
   UseCloudFront: !Equals [!Ref frontendMode, cloudfront]
   UseApiGateway: !Equals [!Ref frontendMode, apigateway]
   HasCustomDomain: !And
     - !Equals [!Ref frontendMode, cloudfront]
+    - !Not [!Equals [!Ref DomainName, ""]]
+  HasApiCustomDomain: !And
+    - !Equals [!Ref frontendMode, apigateway]
     - !Not [!Equals [!Ref DomainName, ""]]
 
 Resources:
@@ -209,6 +212,24 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
 
+  ApiCustomDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasApiCustomDomain
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref AcmCertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  ApiCustomDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasApiCustomDomain
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiCustomDomain
+      Stage: $default
+
 Outputs:
   BucketName:
     Value: !Ref FrontendBucket
@@ -220,4 +241,15 @@ Outputs:
         - HasCustomDomain
         - !Sub https://${DomainName}
         - !Sub https://${Distribution.DomainName}
-      - !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+      - !If
+        - HasApiCustomDomain
+        - !Sub https://${DomainName}
+        - !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  ApiCustomDomainTarget:
+    Condition: HasApiCustomDomain
+    Description: Point the customer DNS record (CNAME/alias) at this regional target
+    Value: !GetAtt ApiCustomDomain.RegionalDomainName
+  ApiCustomDomainHostedZoneId:
+    Condition: HasApiCustomDomain
+    Description: Route 53 alias hosted zone id for the regional target
+    Value: !GetAtt ApiCustomDomain.RegionalHostedZoneId

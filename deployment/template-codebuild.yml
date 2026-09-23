@@ -51,6 +51,14 @@ Parameters:
       - cloudfront
       - apigateway
     Default: cloudfront
+  customAmplifyDomain:
+    Type: String
+    Description: Optional custom UI domain (parameter name kept for deploy.sh parity across rails; mandatory in the China regions)
+    Default: ""
+  uiDomainCertificateArn:
+    Type: String
+    Description: ACM certificate ARN for uiDomain (required when uiDomain is set)
+    Default: ""
 
 Conditions:
   IsEmptyCloudTrailAuditLogs: !Equals [!Ref CloudTrailAuditLogs, ""]
@@ -120,6 +128,10 @@ Resources:
             Value: !Ref cacheTTL
           - Name: FRONTEND_MODE
             Value: !Ref frontendMode
+          - Name: UI_DOMAIN
+            Value: !Ref customAmplifyDomain
+          - Name: UI_DOMAIN_CERTIFICATE_ARN
+            Value: !Ref uiDomainCertificateArn
       Source:
         Type: CODECOMMIT
         Location: !If
@@ -147,13 +159,14 @@ Resources:
                 - '# Deploy the exported backend via the official construct'
                 - cd deployment/exported-backend-app && npm ci --no-audit --no-fund
                 - export EXPORT_PATH=$CODEBUILD_SRC_DIR/export-out/amplify-export-teamidcapp
+                - npx cdk bootstrap "aws://$TEAM_ACCOUNT/$AWS_REGION" 2>&1 | tail -1
                 - npx cdk deploy --all --require-approval never --method=direct
                 - cd $CODEBUILD_SRC_DIR
                 - '# Frontend: React build + hosting stack'
                 - python3 deployment/generate-aws-exports.py "amplify-teamidcapp-${ENV_NAME:-main}-00000"
                 - npm ci
                 - npm run build
-                - aws cloudformation deploy --template-file deployment/frontend-hosting.yml --stack-name TEAM-FRONTEND-HOSTING --parameter-overrides frontendMode=$FRONTEND_MODE --capabilities CAPABILITY_IAM
+                - aws cloudformation deploy --template-file deployment/frontend-hosting.yml --stack-name TEAM-FRONTEND-HOSTING --parameter-overrides frontendMode=$FRONTEND_MODE DomainName=$UI_DOMAIN AcmCertificateArn=$UI_DOMAIN_CERTIFICATE_ARN --capabilities CAPABILITY_IAM
                 - '# sync build/ to the hosting bucket exported by the hosting stack'
                 - BUCKET=$(aws cloudformation describe-stacks --stack-name TEAM-FRONTEND-HOSTING --query "Stacks[0].Outputs[?OutputKey=='BucketName']|[0].OutputValue" --output text)
                 - aws s3 sync build/ "s3://$BUCKET/" --delete

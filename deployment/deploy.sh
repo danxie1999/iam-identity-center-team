@@ -20,8 +20,9 @@ set -xe
 # ---- Deployment-mode selection & partition fail-fast (all optional; unset = current behaviour) ----
 DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-amplify}"
 case "$DEPLOYMENT_MODE" in
-  amplify)   TEMPLATE_FILE=template.yml ;;
-  codebuild) TEMPLATE_FILE=template-codebuild.yml ;;
+  amplify)   TEMPLATE_FILE=template.yml; EXTRA_OVERRIDES="" ;;
+  codebuild) TEMPLATE_FILE=template-codebuild.yml
+             EXTRA_OVERRIDES="frontendMode=${FRONTEND_MODE:-cloudfront} uiDomainCertificateArn=${UI_DOMAIN_CERTIFICATE_ARN:-}" ;;
   *) echo "ERROR: DEPLOYMENT_MODE must be 'amplify' or 'codebuild' (got '$DEPLOYMENT_MODE')"; exit 1 ;;
 esac
 if [[ "$REGION" == cn-* && "$DEPLOYMENT_MODE" == "amplify" ]]; then
@@ -29,8 +30,10 @@ if [[ "$REGION" == cn-* && "$DEPLOYMENT_MODE" == "amplify" ]]; then
   echo "       Set DEPLOYMENT_MODE=codebuild in parameters.sh."
   exit 1
 fi
-if [[ "$DEPLOYMENT_MODE" == "codebuild" && ! -z "$UI_DOMAIN" ]]; then
-  echo "ERROR: UI_DOMAIN is not yet supported with DEPLOYMENT_MODE=codebuild (configure the custom domain on the frontend hosting stack instead)."
+if [[ "$DEPLOYMENT_MODE" == "codebuild" && ! -z "$UI_DOMAIN" && -z "$UI_DOMAIN_CERTIFICATE_ARN" ]]; then
+  echo "ERROR: UI_DOMAIN with DEPLOYMENT_MODE=codebuild requires UI_DOMAIN_CERTIFICATE_ARN"
+  echo "       (an ACM certificate in the deployment region; Amplify Hosting manages"
+  echo "       certificates automatically, the CodeBuild rail does not)."
   exit 1
 fi
 
@@ -64,7 +67,7 @@ if [ -z "$SECRET_NAME" ]; then
           cacheTTL=$CACHE_TTL \
           customAmplifyDomain="$UI_DOMAIN" \
         --tags $TAGS \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
       aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
@@ -77,7 +80,7 @@ if [ -z "$SECRET_NAME" ]; then
           teamAccount="$TEAM_ACCOUNT" \
           cacheTTL=$CACHE_TTL \
         --tags $TAGS \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     fi
   else
     if [[ ! -z "$UI_DOMAIN" ]]; then
@@ -92,7 +95,7 @@ if [ -z "$SECRET_NAME" ]; then
           tags="$TAGS" \
           customAmplifyDomain="$UI_DOMAIN" \
           cacheTTL=$CACHE_TTL \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
       aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
@@ -103,7 +106,7 @@ if [ -z "$SECRET_NAME" ]; then
           teamAuditGroup="$TEAM_AUDITOR_GROUP" \
           teamAccount="$TEAM_ACCOUNT" \
           cacheTTL=$CACHE_TTL \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     fi
   fi
 else
@@ -124,7 +127,7 @@ else
           customRepository="Yes" \
           customRepositorySecretName="$SECRET_NAME" \
         --tags $TAGS \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
       aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
@@ -139,7 +142,7 @@ else
           customRepository="Yes" \
           customRepositorySecretName="$SECRET_NAME" \
         --tags $TAGS \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     fi
   else
     if [[ ! -z "$UI_DOMAIN" ]]; then
@@ -156,7 +159,7 @@ else
           cacheTTL=$CACHE_TTL \
           customRepository="Yes" \
           customRepositorySecretName="$SECRET_NAME" \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     else
       aws cloudformation deploy --region $REGION --template-file $TEMPLATE_FILE \
         --stack-name TEAM-IDC-APP \
@@ -169,7 +172,7 @@ else
           cacheTTL=$CACHE_TTL \
           customRepository="Yes" \
           customRepositorySecretName="$SECRET_NAME" \
-        --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
+        $EXTRA_OVERRIDES --no-fail-on-empty-changeset --capabilities CAPABILITY_NAMED_IAM
     fi
   fi
 fi

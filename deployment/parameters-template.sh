@@ -38,3 +38,9 @@ CACHE_TTL=604800
 #
 # FRONTEND_MODE (codebuild mode only): 'cloudfront' (default) or 'apigateway'.
 # FRONTEND_MODE=apigateway
+#
+# UI_DOMAIN_CERTIFICATE_ARN (codebuild mode only): ACM certificate for UI_DOMAIN.
+#   Required when UI_DOMAIN is set in codebuild mode. In the China regions a custom
+#   domain (ICP-recorded, certificate imported into the cn ACM) is mandatory -
+#   AWS-managed default domains cannot serve the UI there.
+# UI_DOMAIN_CERTIFICATE_ARN=arn:aws:acm:us-east-1:123456789101:certificate/xxxx
